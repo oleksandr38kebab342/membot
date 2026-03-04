@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  membot:
+    build: .
+    environment:
+      BOT_TOKEN: "${BOT_TOKEN}"
+      JOKE_DAY_TIME: "${JOKE_DAY_TIME:-13:00}"
+      TIMEZONE: "${TIMEZONE:-Europe/Kyiv}"
+      COOLDOWN_SECONDS: "${COOLDOWN_SECONDS:-150}"
+    volumes:
+      - ./data.db:/app/data.db
+    restart: unless-stopped

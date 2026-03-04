@@ -1,5 +1,4 @@
-telebot
-random
-os
-uuid
-json
+pyTelegramBotAPI==4.20.0
+SQLAlchemy==2.0.32
+tzdata==2024.1
+alembic==1.13.2

@@ -1,89 +1,97 @@
-# if __name__ == "__main__":
-#     while True:
-#         try:
-#             bot.polling(none_stop=True, timeout=60)
-#         except Exception as e:
-#             print(f"Error occurred: {e}")
-#             bot.stop_polling()
-#             time.sleep(10)
+import logging
+import time
+
 import telebot
 from telebot import types
-import random
-import os
-import uuid
-import json
-import sqlite3
-import time  
+
+import config
+import db
+import repositories
+import scheduler
+import services
 
 
-ключ = '7263357915:AAGlhHrShoDVhwRPunuc5JFcfTWjQQ6ZOnQ'
-bot = telebot.TeleBot(ключ)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
-ADMIN_USERS = [824228525]
+if not config.BOT_TOKEN:
+    raise SystemExit("BOT_TOKEN is required. Set it as an environment variable.")
 
-def initialize_json_file(filename):
-    if not os.path.exists(filename) or os.stat(filename).st_size == 0:
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump([], f)
+bot = telebot.TeleBot(config.BOT_TOKEN, threaded=True, num_threads=8)
 
-for filename in ['Звичайні.json', 'Чорні.json', 'Проби.json']:
-    initialize_json_file(filename)
 
-jokes_to_approve = {}
-
-def get_db_connection():
-    return sqlite3.connect('data.db')
-
-def load_jokes_from_db(table_name):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(f"SELECT id, data FROM {table_name}")
-    jokes = cursor.fetchall()  # повертає список (id, data)
- # jokes_to_approve більше не використовується
-    return jokes
-
-def save_joke_to_db(table_name, joke):
-    # joke має бути tuple: (text, user_id)
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_name} (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT, user_id INTEGER)")
-    cursor.execute(f"INSERT INTO {table_name} (data, user_id) VALUES (?, ?)", joke)
-    conn.commit()
-    conn.close()
-
-def delete_joke_from_attempt(joke):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM attempt WHERE data = ?", (joke,))
-    conn.commit()
-    conn.close()
-
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
+def build_main_menu(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     btn1 = types.KeyboardButton("Звичайні жарти")
     btn2 = types.KeyboardButton("Чорні жарти")
     btn3 = types.KeyboardButton("Відправити анекдот")
-    buttons = [btn1, btn2, btn3]
-    btn5 = types.KeyboardButton("Рейтинг")
-    buttons.append(btn5)
-    # Додаємо кнопку "Одобрення" лише для модератора
-    if message.from_user.id in ADMIN_USERS:
-        btn4 = types.KeyboardButton("Одобрення")
-        buttons.append(btn4)
+    btn4 = types.KeyboardButton("Рейтинг")
+    btn5 = types.KeyboardButton(config.PROFILE_BUTTON)
+    buttons = [btn1, btn2, btn3, btn4, btn5]
+    if user_id in config.ADMIN_USERS:
+        buttons.append(types.KeyboardButton("Одобрення"))
     markup.add(*buttons)
+    return markup
+
+
+def safe_handler(handler):
+    def wrapper(message):
+        try:
+            return handler(message)
+        except Exception:
+            logger.exception("Handler error")
+            try:
+                bot.send_message(message.chat.id, "Сталася помилка. Спробуйте пізніше.")
+            except Exception:
+                pass
+    return wrapper
+
+
+def safe_callback(handler):
+    def wrapper(call):
+        try:
+            return handler(call)
+        except Exception:
+            logger.exception("Callback error")
+            try:
+                bot.send_message(call.message.chat.id, "Сталася помилка. Спробуйте пізніше.")
+            except Exception:
+                pass
+    return wrapper
+
+
+def ensure_user(message):
+    username = message.from_user.username or str(message.from_user.id)
+    repositories.upsert_user(message.from_user.id, username)
+    return username
+
+@bot.message_handler(commands=['start'])
+@safe_handler
+def send_welcome(message):
+    ensure_user(message)
+    markup = build_main_menu(message.from_user.id)
     bot.send_message(message.chat.id, "Привіт! Обери тип жартів або надішли свій анекдот:", reply_markup=markup)
 
 @bot.message_handler(commands=['comicchnu'])
+@safe_handler
 def send_chat_id(message):
+    ensure_user(message)
     chat_id = message.chat.id
     bot.send_message(chat_id, f"Your chat ID is: {chat_id}")
 
-@bot.message_handler(func=lambda message: message.text in ["Звичайні жарти", "Чорні жарти", "Відправити анекдот", "Одобрення"])
+
+@bot.message_handler(commands=['profile'])
+@safe_handler
+def profile_command(message):
+    ensure_user(message)
+    show_profile(message)
+
+@bot.message_handler(func=lambda message: message.text in ["Звичайні жарти", "Чорні жарти", "Відправити анекдот", "Одобрення", "Рейтинг", config.PROFILE_BUTTON])
+@safe_handler
 def handle_joke_request(message):
+    ensure_user(message)
     if message.text == "Рейтинг":
-        import rating
-        top = rating.get_top_users()
+        top = repositories.get_top_users()
         if top:
             msg = "Топ 7 користувачів за рейтингом:\n"
             for i, (username, rate) in enumerate(top, 1):
@@ -91,134 +99,126 @@ def handle_joke_request(message):
             bot.send_message(message.chat.id, msg)
         else:
             bot.send_message(message.chat.id, "Ще немає користувачів з балами.")
-    if message.text == "Одобрення" and message.from_user.id in ADMIN_USERS:
-        jokes = load_jokes_from_db('attempt')
-        if jokes:
-            joke_id, joke_text = jokes[0]
+        return
+    if message.text == config.PROFILE_BUTTON:
+        show_profile(message)
+        return
+    if message.text == "Одобрення" and message.from_user.id in config.ADMIN_USERS:
+        joke = repositories.get_random_attempt()
+        if joke:
             markup = types.InlineKeyboardMarkup()
-            btn1 = types.InlineKeyboardButton("Звичайні", callback_data=f"approve_usual|{joke_id}")
-            btn2 = types.InlineKeyboardButton("Чорні", callback_data=f"approve_black|{joke_id}")
-            btn3 = types.InlineKeyboardButton("Видалити", callback_data=f"delete|{joke_id}")
+            btn1 = types.InlineKeyboardButton("Звичайні", callback_data=f"approve_usual|{joke.id}")
+            btn2 = types.InlineKeyboardButton("Чорні", callback_data=f"approve_black|{joke.id}")
+            btn3 = types.InlineKeyboardButton("Видалити", callback_data=f"delete|{joke.id}")
             markup.add(btn1, btn2, btn3)
-            bot.send_message(message.chat.id, f"Анекдот на одобрення:\n\n{joke_text}", reply_markup=markup)
+            bot.send_message(message.chat.id, f"Анекдот на одобрення:\n\n{joke.data}", reply_markup=markup)
         else:
             bot.send_message(message.chat.id, "Немає жартів на одобрення.")
+        return
     if message.text == "Звичайні жарти":
-        jokes = load_jokes_from_db('common')
-        if jokes:
-            joke_text = random.choice(jokes)[1]  # беремо лише текст
-            bot.send_message(message.chat.id, joke_text)
+        joke = repositories.get_random_joke("common")
+        if joke:
+            bot.send_message(message.chat.id, joke.data)
         else:
             bot.send_message(message.chat.id, "Вибачте, але зараз немає звичайних жартів.")
-    elif message.text == "Чорні жарти":
-        jokes = load_jokes_from_db('black')
-        if jokes:
-            joke_text = random.choice(jokes)[1]
-            bot.send_message(message.chat.id, joke_text)
+        return
+    if message.text == "Чорні жарти":
+        joke = repositories.get_random_joke("black")
+        if joke:
+            bot.send_message(message.chat.id, joke.data)
         else:
             bot.send_message(message.chat.id, "Вибачте, але зараз немає чорних жартів.")
-    elif message.text == "Відправити анекдот":
+        return
+    if message.text == "Відправити анекдот":
         msg = bot.send_message(message.chat.id, "Надішліть свій анекдот:")
         bot.register_next_step_handler(msg, save_user_joke)
 
+@safe_handler
 def save_user_joke(message):
-    joke = message.text
-    joke_id = str(uuid.uuid4())
-    jokes_to_approve[joke_id] = joke
-    save_joke_to_db('attempt', (joke, message.from_user.id))
+    ensure_user(message)
+    joke = (message.text or "").strip()
+    if not joke:
+        bot.send_message(message.chat.id, "Анекдот не може бути порожнім. Спробуйте ще раз.")
+        return
+    can_submit, wait_seconds = services.can_submit_joke(message.from_user.id, config.COOLDOWN_SECONDS)
+    if not can_submit:
+        bot.send_message(message.chat.id, f"Зачекайте {wait_seconds} сек перед наступним анекдотом.")
+        return
+    services.record_joke_submission(message.from_user.id)
+    repositories.add_attempt_joke(joke, message.from_user.id)
     bot.send_message(message.chat.id, "Дякуємо! Ваш анекдот було збережено для перевірки.")
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM attempt")
-    count = cursor.fetchone()[0]
-    conn.close()
-    # Пороги для сповіщень: 8, 15, 22, ...
+    count = repositories.count_attempts()
     threshold = 7
     notify = False
-    if count > threshold:
-        if (count - threshold) % 7 == 1:
-            notify = True
+    if count > threshold and (count - threshold) % 7 == 1:
+        notify = True
     if notify:
-        for admin_id in ADMIN_USERS:
+        for admin_id in config.ADMIN_USERS:
             bot.send_message(admin_id, "Є нові анекдоти на одобрення! Натисніть кнопку 'Одобрення'.")
 @bot.callback_query_handler(func=lambda call: call.data.startswith('approve_') or call.data.startswith('delete'))
+@safe_callback
 def handle_approval(call):
     action, joke_id = call.data.split('|', 1)
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT data FROM attempt WHERE id = ?", (joke_id,))
-        result = cursor.fetchone()
-        if not result:
-            bot.send_message(call.message.chat.id, "Помилка: анекдот не знайдено або вже оброблений.")
-            # Видаляємо повідомлення з кнопками
-            try:
-                bot.delete_message(call.message.chat.id, call.message.message_id)
-            except Exception:
-                pass
-            conn.close()
-            return
-        joke_text = result[0]
-        # Отримуємо user_id для рейтингу
-        cursor.execute("SELECT user_id FROM attempt WHERE id = ?", (joke_id,))
-        user_row = cursor.fetchone()
-        user_id = user_row[0] if user_row else None
-        username = None
-        # Отримуємо username через get_chat (можна додати кешування)
-        if user_id:
-            try:
-                user = bot.get_chat(user_id)
-                username = user.username or str(user_id)
-            except Exception:
-                username = str(user_id)
-        # Видаляємо повідомлення з кнопками після вибору дії
+    joke = repositories.get_attempt_by_id(joke_id)
+    if not joke:
+        bot.send_message(call.message.chat.id, "Помилка: анекдот не знайдено або вже оброблений.")
         try:
             bot.delete_message(call.message.chat.id, call.message.message_id)
         except Exception:
             pass
-        import rating
-        if action == 'approve_usual':
-            save_joke_to_db('common', (joke_text, user_id))
-            cursor.execute("DELETE FROM attempt WHERE id = ?", (joke_id,))
-            conn.commit()
-            if user_id:
-                rating.add_or_update_user_rating(user_id, username, 5)
-            bot.send_message(call.message.chat.id, "Анекдот додано до звичайних жартів.")
-        elif action == 'approve_black':
-            save_joke_to_db('black', (joke_text, user_id))
-            cursor.execute("DELETE FROM attempt WHERE id = ?", (joke_id,))
-            conn.commit()
-            if user_id:
-                rating.add_or_update_user_rating(user_id, username, 10)
-            bot.send_message(call.message.chat.id, "Анекдот додано до чорних жартів.")
-        elif action == 'delete':
-            cursor.execute("DELETE FROM attempt WHERE id = ?", (joke_id,))
-            conn.commit()
-            if user_id:
-                rating.add_or_update_user_rating(user_id, username, 0)
-            bot.send_message(call.message.chat.id, "Анекдот видалено.")
-        else:
-            bot.send_message(call.message.chat.id, "Невідома дія!")
-        # Показуємо наступний анекдот, якщо є
-        cursor.execute("SELECT id, data FROM attempt")
-        next_joke_row = cursor.fetchone()
-        if next_joke_row:
-            next_joke_id, next_joke_text = next_joke_row
-            markup = types.InlineKeyboardMarkup()
-            btn1 = types.InlineKeyboardButton("Звичайні", callback_data=f"approve_usual|{next_joke_id}")
-            btn2 = types.InlineKeyboardButton("Чорні", callback_data=f"approve_black|{next_joke_id}")
-            btn3 = types.InlineKeyboardButton("Видалити", callback_data=f"delete|{next_joke_id}")
-            markup.add(btn1, btn2, btn3)
-            bot.send_message(call.message.chat.id, f"Анекдот на одобрення:\n\n{next_joke_text}", reply_markup=markup)
-        else:
-            bot.send_message(call.message.chat.id, "Немає жартів на одобрення.")
-    except Exception as e:
-        bot.send_message(call.message.chat.id, f"Виникла помилка: {e}")
-    finally:
-        conn.close()
+        return
+    user = repositories.get_user(joke.user_id) if joke.user_id else None
+    username = user.username if user else str(joke.user_id)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+    if action == 'approve_usual':
+        repositories.add_common_joke(joke.data, joke.user_id)
+        repositories.delete_attempt_by_id(joke.id)
+        if joke.user_id:
+            repositories.add_or_update_user_rating(joke.user_id, username, 5, accepted_inc=1)
+        bot.send_message(call.message.chat.id, "Анекдот додано до звичайних жартів.")
+    elif action == 'approve_black':
+        repositories.add_black_joke(joke.data, joke.user_id)
+        repositories.delete_attempt_by_id(joke.id)
+        if joke.user_id:
+            repositories.add_or_update_user_rating(joke.user_id, username, 10, accepted_inc=1)
+        bot.send_message(call.message.chat.id, "Анекдот додано до чорних жартів.")
+    elif action == 'delete':
+        repositories.delete_attempt_by_id(joke.id)
+        bot.send_message(call.message.chat.id, "Анекдот видалено.")
+    else:
+        bot.send_message(call.message.chat.id, "Невідома дія!")
+    next_joke = repositories.get_random_attempt()
+    if next_joke:
+        markup = types.InlineKeyboardMarkup()
+        btn1 = types.InlineKeyboardButton("Звичайні", callback_data=f"approve_usual|{next_joke.id}")
+        btn2 = types.InlineKeyboardButton("Чорні", callback_data=f"approve_black|{next_joke.id}")
+        btn3 = types.InlineKeyboardButton("Видалити", callback_data=f"delete|{next_joke.id}")
+        markup.add(btn1, btn2, btn3)
+        bot.send_message(call.message.chat.id, f"Анекдот на одобрення:\n\n{next_joke.data}", reply_markup=markup)
+    else:
+        bot.send_message(call.message.chat.id, "Немає жартів на одобрення.")
+
+
+def show_profile(message):
+    profile = repositories.get_user_profile(message.from_user.id)
+    if not profile:
+        bot.send_message(message.chat.id, "У вас поки немає рейтингу.")
+        return
+    msg = (
+        f"Профіль: {profile['username']}\n"
+        f"Бали: {profile['rate']}\n"
+        f"Прийняті жарти: {profile['accepted_count']}\n"
+        f"Місце в рейтингу: {profile['rank']}"
+    )
+    bot.send_message(message.chat.id, msg)
 
 if __name__ == "__main__":
+    db.init_db()
+    scheduler.start_joke_of_day_scheduler(bot, config.JOKE_DAY_TIME, config.TIMEZONE)
     while True:
         try:
             bot.polling(none_stop=True, timeout=60)
