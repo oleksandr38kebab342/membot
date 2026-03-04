@@ -15,7 +15,7 @@ def upsert_user(user_id, username):
             user.last_seen_at = now
         else:
             user = User(id=user_id, username=username, last_seen_at=now)
-            session.add(user)
+            session.merge(user)
 
 
 def get_user(user_id):
