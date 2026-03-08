@@ -3,6 +3,7 @@
 ## Docker Compose
 
 ```bash
+copy .env.example .env
 set BOT_TOKEN=your-token
 set JOKE_DAY_TIME=13:00
 set TIMEZONE=Europe/Kyiv

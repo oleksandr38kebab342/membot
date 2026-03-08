@@ -2,6 +2,11 @@ from __future__ import with_statement
 
 import os
 from logging.config import fileConfig
+import sys
+
+APP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if APP_ROOT not in sys.path:
+    sys.path.insert(0, APP_ROOT)
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool

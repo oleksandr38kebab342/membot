@@ -3,6 +3,8 @@ version: "3.9"
 services:
   membot:
     build: .
+    env_file:
+      - .env
     environment:
       BOT_TOKEN: "${BOT_TOKEN}"
       JOKE_DAY_TIME: "${JOKE_DAY_TIME:-13:00}"

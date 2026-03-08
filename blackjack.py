@@ -29,7 +29,7 @@ def build_main_menu(user_id):
     btn5 = types.KeyboardButton(config.PROFILE_BUTTON)
     buttons = [btn1, btn2, btn3, btn4, btn5]
     if user_id in config.ADMIN_USERS:
-        buttons.append(types.KeyboardButton("Одобрення"))
+        buttons.append(types.KeyboardButton("Адмін-панель"))
     markup.add(*buttons)
     return markup
 
@@ -86,7 +86,7 @@ def profile_command(message):
     ensure_user(message)
     show_profile(message)
 
-@bot.message_handler(func=lambda message: message.text in ["Звичайні жарти", "Чорні жарти", "Відправити анекдот", "Одобрення", "Рейтинг", config.PROFILE_BUTTON])
+@bot.message_handler(func=lambda message: message.text in ["Звичайні жарти", "Чорні жарти", "Відправити анекдот", "Адмін-панель", "Рейтинг", config.PROFILE_BUTTON])
 @safe_handler
 def handle_joke_request(message):
     ensure_user(message)
@@ -103,7 +103,7 @@ def handle_joke_request(message):
     if message.text == config.PROFILE_BUTTON:
         show_profile(message)
         return
-    if message.text == "Одобрення" and message.from_user.id in config.ADMIN_USERS:
+    if message.text == "Адмін-панель" and message.from_user.id in config.ADMIN_USERS:
         joke = repositories.get_random_attempt()
         if joke:
             markup = types.InlineKeyboardMarkup()
@@ -155,7 +155,7 @@ def save_user_joke(message):
         notify = True
     if notify:
         for admin_id in config.ADMIN_USERS:
-            bot.send_message(admin_id, "Є нові анекдоти на одобрення! Натисніть кнопку 'Одобрення'.")
+            bot.send_message(admin_id, "Є нові анекдоти на одобрення! Натисніть кнопку 'Адмін-панель'.")
 @bot.callback_query_handler(func=lambda call: call.data.startswith('approve_') or call.data.startswith('delete'))
 @safe_callback
 def handle_approval(call):
